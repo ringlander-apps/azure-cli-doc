@@ -1,0 +1,202 @@
+How to set variables in bash
+
+Regular assignment
+--------------------------------------------------
+assignedVar="assignedValue"
+assignedVarAsResultOfScript=$(the command to run)
+
+Use assigned variables
+--------------------------------------------------
+For instance if you want to show what's hidden in the assignedVar
+
+echo $assignedVar
+This will print assignedValue in the console
+
+echo $assignedVarAsResultOfScript
+This will print the returned result of the executed command
+
+Example:
+Set up variables
+
+$acrName="ringlanderacr" --This is the Azure Container Registry Name registered with Azure
+
+Now we want to establish the loginServer parameter of the ACR
+
+Set the variable: 
+var=$(command)==>
+
+acrServer=$(az acr show -n $acrName --query loginServer --output tsv)
+
+The above command will give us the loginServer value outputed as tab-separated-value
+
+acrPassword=$(az acr credential show -n $acrName --query "passwords[0].value" -o tsv)
+
+This command will give us the password value stored in the passwords array as a tab-separated-value
+By setting the admin-enabled flag when creating the ringlanderacr private container registry
+
+We now need to setup a storage account
+1. Create a new resource group
+	a) resourceGroup="AciPrivateRegistryDemo"
+	b) location="westeurope"
+	c) az group create -n $resourceGroup -l $location
+2. Create the storage account using resource group and storageAccountName
+	a) storageAccountNAme="acishare987678"
+	b) az storage account create -g $resourceGroup -n $storageAccountName --sku Standard_LRS
+
+3. Get
+
+az storage account create -g $resourceGroup -n $storageAccountName --sku Standard_LRS
+
+Get the storageConnString==>
+storageConnString=$(az storage account show-connection-string -n $storageAccountName -g $resourceGroup --query connectionString -o tsv)
+
+This need to be stored as an environment variable like so:
+export AZURE_STORAGE_CONNECTION_STRING=$storageConnString
+
+4. Create file share
+	a) shareName="acishare"
+	b) az storage share create -n $shareName --This command will create the share using the stored environment variable
+5. Get the storage key
+	a) storageKey = $(az storage account keys list -g $resourceGroup --account-name $storageAccountName --query "[0].value" -o tsv)
+
+
+
+az container create -g $resourceGroup -n $containerGroupName 
+	--image $acrServer/samplewebapi:v2 
+	--cpu 1 --memory 1.5 
+	--registry-username $acrName 
+	--registry-password $acrPassword 
+	--azure-file-volume-account-name $storageAccountName 
+	--azure-file-volume-account-key $storageKey 
+	--azure-file-volume-share-name $shareName 
+	--azure-file-volume-mount-path "/home" 
+	--dns-name-label "aciacr1" 
+	--ports 80
+
+Start shell in on container
+az container exec -n $containerGroupName -g $resourceGroup --exec-command sh
+
+echo hello > /home/message.txt
+exit
+
+check file was created
+az storage file list -s $shareName -o table
+
+Delete whole resource group
+az group delete -n $resourceGroup -y
+
+-- Web App for containers --
+
+This demonstrates setting up a wordpress site as an azure web app service
+
+1. Setup a new resource group
+	a)resourceGroup="wordpressappservice"
+	b)location="westeurope"
+2. Setup a service plan
+	a)planName="wpappservice"
+	b)az appservice plan create -n $planName -g $resourceGroup --is-linux --sku S1
+	
+
+3. Setup local variables for the mysql server
+	a) mysqlServerName="mysql-server-ringlander" -- must be unique (mysql-ringlander)
+	b) adminUser="wpadmin"
+	c) adminPassword="R1nglander140801_mysql"
+
+4. Create a mysql server instance
+	a) az mysql server create -g $resourceGroup -n $mysqlServerName 
+	--admin-user $adminUser 
+	--admin-password $adminPassword 
+	--location $location 
+	--ssl-enforcement Disabled 
+	--sku-name GP_Gen4_2 
+	--version 5.75
+
+5. Create firewall rule
+	az mysql server firewall-rule create -g $resourceGroup 
+	--server $mysqlServerName 
+	--name AllowAppService 
+	--start-ip-address 0.0.0.0 
+	--end-ip-address 0.0.0.0
+
+6. Create the application
+	a)appName="wordpress-ringlander"
+	b)dockerRepo="wordpress"
+	c)az webapp create -n $appName -g $resourceGroup --plan $planName -i $dockerRepo
+
+7. Setup environment variables for connecting to mysql
+	a) Get the domain name of the dbhost:
+	dbHost=$(az mysql server show -g $resourceGroup -n $mysqlServerName --query 		"fullyQualifiedDomainName" -o tsv)
+
+	b)az webapp config appsettings set -n $appName -g $resourceGroup --settings
+	WORDPRESS_DB_HOST=$dbHost 
+	WORDPRESS_DB_USER="$adminUser@$mysqlServerName"
+	WORDPRESS_DB_PASSWORD="$adminPassword"
+
+8. Get the app service domain name
+	az webapp show -n $appName -g $resourceGroup --query "defaultHostName" -o tsv
+	gives us:
+	wordpress-ringlander.azurewebsites.net
+
+-- Scaling out the app service --
+	 az appservice plan update -n $planName -g $resourceGroup --number-of-workers 3
+
+-- Configuring Continuous delivery -- 
+1. Setup a new resource group
+	a)resourceGroup="cicdservice"
+	b)location="westeurope"
+
+	az group create -n $resourceGroup -l $location
+
+2. Setup app service plan
+	a)planName="cicdservice"
+3. Create app service plan
+	a)az appservice plan create -n $planName -g $resourceGroup --is-linux --sku S1
+4. Create the app
+	a)appName="cicd-ringlander"
+	-- Due to limitation in Azure CLI, we cannot point to a private container registry.
+	-- So we create the web app using the smallest public image available in Docker Hub, "scratch"
+	
+	b)az webapp create -n $appName -g $resourceGroup -p $planName -i "scratch"
+
+	az webapp config container set -n $appName -g $resourceGroup 
+	-c "$acrServer/samplewebapi:latest" 
+	-r "https://$acrServer" 
+	-u $acrUserName -p $acrPassword
+
+5. Setup staging slots
+	az webapp deployment slot create -g $resourceGroup -n $appName 
+	-s staging 
+	--configuration-source $appName
+
+6. Enable CI/CD
+	a) Configure CI/CD for the staging slot
+	az webapp deployment container config -g $resourceGroup 
+	-n $appName 
+	-s staging 
+	--enable-cd true
+	
+	returns a web hook: 
+	"CI_CD_URL": 
+"https://$cicd-ringlander__staging:G9yk6izbaNZNp0uRqoRy91ooqb74l4qlwEoR3aMbKqqQhuEBYggsanWrFLnZ@cicd-ringlander-staging.scm.azurewebsites.net/docker/hook",
+  "DOCKER_ENABLE_CI": true
+
+	b)cicdUrl=$(az webapp deployment container 
+	show-cd-url -s staging -n $appName -g $resourceGroup --query CI_CD_URL -o tsv)
+	
+7. Connect the web hook to the registry
+	az acr webhook create --registry $acrName --name myacrwebhook --actions push --uri $cicdUrl
+
+8. Do changes to the application
+9. Build new image with same name and tag
+10. Push to registry
+This will generate a deployment to the staging slot
+11. Check the staging slot
+12. Test (real world scenario)
+13. When change is tested and verified we can swop to production
+
+
+	
+	
+
+
+
